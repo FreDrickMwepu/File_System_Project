@@ -1,0 +1,517 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define DISK_SIZE 1024      // Size of the disk in blocks
+#define BLOCK_SIZE 64       // Size of each block in bytes
+#define FILENAME_MAX_LEN 20 // Maximum length of a filename
+#define ADMIN_PASSWORD "0000" // Administrator password
+
+// Structure representing a file
+typedef struct {
+    char name[FILENAME_MAX_LEN];
+    int start_block;
+    int size;
+} File;
+
+// Structure representing the file allocation table
+typedef struct {
+    int fat[DISK_SIZE]; // FAT table to hold the next block index
+    File* files;        // Dynamically allocated array of files
+    int file_count;     // Number of files stored
+    char disk[DISK_SIZE][BLOCK_SIZE];
+} FATFileSystem;
+
+void initialize_file_system(FATFileSystem *fs) {
+    for (int i = 0; i < DISK_SIZE; i++) {
+        fs->fat[i] = -1;
+    }
+    fs->file_count = 0;
+    fs->files = NULL; // Initialize to NULL
+}
+
+int find_free_block(FATFileSystem *fs) {
+    for (int i = 0; i < DISK_SIZE; i++) {
+        if (fs->fat[i] == -1) {
+            return i;
+        }
+    }
+    return -1; // No free block found
+}
+
+int count_free_blocks(FATFileSystem *fs) {
+    int count = 0;
+    for (int i = 0; i < DISK_SIZE; i++) {
+        if (fs->fat[i] == -1) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int file_exists(FATFileSystem *fs, const char *filename) {
+    for (int i = 0; i < fs->file_count; i++) {
+        if (strcmp(fs->files[i].name, filename) == 0) {
+            return 1; // File with the same name exists
+        }
+    }
+    return 0; // No file with the same name
+}
+
+void create_file(FATFileSystem *fs, const char *filename, const char *data) {
+    if (file_exists(fs, filename)) {
+        printf("File '%s' already exists. Please choose a different name.\n", filename);
+        return;
+    }
+
+    int data_length = strlen(data);
+    int blocks_needed = (data_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // Check if there is enough free space
+    if (count_free_blocks(fs) < blocks_needed) {
+        printf("Not enough free space to create the file.\n");
+        return;
+    }
+
+    int start_block = find_free_block(fs);
+    if (start_block == -1) {
+        printf("No free blocks available.\n");
+        return;
+    }
+
+    // Allocate memory for new file entry
+    fs->files = (File*) realloc(fs->files, (fs->file_count + 1) * sizeof(File));
+    if (!fs->files) {
+        printf("Memory allocation failed.\n");
+        return;
+    }
+
+    File *file = &fs->files[fs->file_count++];
+    strncpy(file->name, filename, FILENAME_MAX_LEN);
+    file->start_block = start_block;
+    file->size = data_length;
+
+    int current_block = start_block;
+    for (int i = 0; i < blocks_needed; i++) {
+        int next_block = (i == blocks_needed - 1) ? -1 : find_free_block(fs);
+        if (next_block == -1 && i < blocks_needed - 1) {
+            printf("Not enough free blocks.\n");
+            return;
+        }
+
+        strncpy(fs->disk[current_block], data + i * BLOCK_SIZE, BLOCK_SIZE);
+        fs->fat[current_block] = next_block;
+        current_block = next_block;
+    }
+}
+
+void read_file(FATFileSystem *fs, const char *filename) {
+    for (int i = 0; i < fs->file_count; i++) {
+        if (strcmp(fs->files[i].name, filename) == 0) {
+            int block = fs->files[i].start_block;
+            while (block != -1) {
+                printf("%s", fs->disk[block]);
+                block = fs->fat[block];
+            }
+            printf("\n");
+            return;
+        }
+    }
+    printf("File not found.\n");
+}
+
+void write_to_file(FATFileSystem *fs, const char *filename, const char *data) {
+    for (int i = 0; i < fs->file_count; i++) {
+        if (strcmp(fs->files[i].name, filename) == 0) {
+            printf("File '%s' found.\n", filename);
+            printf("Current content:\n");
+            read_file(fs, filename);
+
+            printf("Do you want to:\n");
+            printf("1. Overwrite the file\n");
+            printf("2. Append to the file\n");
+            printf("Enter your choice: ");
+
+            int option;
+            if (scanf("%d", &option) != 1) {
+                printf("Invalid input. Aborting write operation.\n");
+                while (getchar() != '\n'); // Clear invalid input
+                return;
+            }
+            getchar(); // Consume newline character left by scanf
+
+            int block;
+            switch (option) {
+                case 1: // Overwrite
+                {
+                    // Free the current blocks
+                    block = fs->files[i].start_block;
+                    while (block != -1) {
+                        int next_block = fs->fat[block];
+                        fs->fat[block] = -1;
+                        block = next_block;
+                    }
+
+                    // Reset file's start block
+                    fs->files[i].start_block = -1;
+                    fs->files[i].size = 0;
+
+                    // Calculate blocks needed for new data
+                    int data_length = strlen(data);
+                    int blocks_needed = (data_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+                    // Check if there is enough free space
+                    if (count_free_blocks(fs) < blocks_needed) {
+                        printf("Not enough free space to write to the file.\n");
+                        return;
+                    }
+
+                    // Find new starting block
+                    int start_block = find_free_block(fs);
+                    if (start_block == -1) {
+                        printf("No free blocks available.\n");
+                        return;
+                    }
+
+                    // Update file's start block and size
+                    fs->files[i].start_block = start_block;
+                    fs->files[i].size = data_length;
+
+                    // Write new data to blocks
+                    int current_block = start_block;
+                    for (int j = 0; j < blocks_needed; j++) {
+                        int next_block = (j == blocks_needed - 1) ? -1 : find_free_block(fs);
+                        if (next_block == -1 && j < blocks_needed - 1) {
+                            printf("Not enough free blocks.\n");
+                            return;
+                        }
+
+                        strncpy(fs->disk[current_block], data + j * BLOCK_SIZE, BLOCK_SIZE);
+                        fs->fat[current_block] = next_block;
+                        current_block = next_block;
+                    }
+
+                    break;
+                }
+
+                case 2: // Append
+                {
+                    // Find the last block of the current file
+                    block = fs->files[i].start_block;
+                    if (block == -1) {
+                        printf("File has no data to append to.\n");
+                        return;
+                    }
+
+                    // Traverse to the last block
+                    while (fs->fat[block] != -1) {
+                        block = fs->fat[block];
+                    }
+
+                    // Calculate the remaining space in the last block
+                    int remaining_space = BLOCK_SIZE - (fs->files[i].size % BLOCK_SIZE);
+                    int data_length = strlen(data);
+
+                    // Append to the remaining space in the last block if possible
+                    int to_write = (remaining_space >= data_length) ? data_length : remaining_space;
+                    strncat(fs->disk[block], data, to_write);
+                    fs->files[i].size += to_write;
+
+                    // Calculate blocks needed for remaining data
+                    data_length -= to_write;
+                    data += to_write;
+                    int blocks_needed = (data_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+                    // Check if there is enough free space
+                    if (count_free_blocks(fs) < blocks_needed) {
+                        printf("Not enough free space to append to the file.\n");
+                        return;
+                    }
+
+                    // Append remaining data to new blocks
+                    for (int j = 0; j < blocks_needed; j++) {
+                        int next_block = find_free_block(fs);
+                        if (next_block == -1) {
+                            printf("No free blocks available for appending.\n");
+                            return;
+                        }
+
+                        strncpy(fs->disk[next_block], data + j * BLOCK_SIZE, BLOCK_SIZE);
+                        fs->fat[block] = next_block;
+                        block = next_block;
+                        fs->files[i].size += BLOCK_SIZE;
+                    }
+
+                    break;
+                }
+
+                default:
+                    printf("Invalid choice. Aborting write operation.\n");
+                    break;
+            }
+
+            return;
+        }
+    }
+
+    printf("File '%s' not found. Write operation aborted.\n", filename);
+}
+
+void delete_file(FATFileSystem *fs, const char *filename) {
+    for (int i = 0; i < fs->file_count; i++) {
+        if (strcmp(fs->files[i].name, filename) == 0) {
+            int block = fs->files[i].start_block;
+            while (block != -1) {
+                int next_block = fs->fat[block];
+                fs->fat[block] = -1;
+                block = next_block;
+            }
+
+            // Shift files in the array
+            for (int j = i; j < fs->file_count - 1; j++) {
+                fs->files[j] = fs->files[j + 1];
+            }
+            fs->file_count--;
+            fs->files = (File*) realloc(fs->files, fs->file_count * sizeof(File));
+            if (fs->file_count == 0) {
+                fs->files = NULL; // Reset to NULL if no files left
+            }
+            printf("File '%s' deleted.\n", filename);
+            return;
+        }
+    }
+    printf("File not found.\n");
+}
+
+void display_menu(int role, FATFileSystem *fs) {
+    if (role == 1) {
+        printf("Administrator Menu:\n");
+        printf("1. Create a file\n");
+        printf("2. Write to a file\n");
+        printf("3. Delete a file\n");
+        printf("4. Read a file\n");
+        printf("5. Switch to User Mode\n");
+        printf("6. Exit\n");
+    } else if (role == 2) {
+        printf("User Menu:\n");
+        printf("1. Read a file\n");
+        printf("2. Switch to Administrator Mode\n");
+        printf("3. Exit\n");
+
+        // Display files available for reading
+        printf("Available files:\n");
+        for (int i = 0; i < fs->file_count; i++) {
+            printf("%d. %s\n", i + 1, fs->files[i].name);
+        }
+    }
+    printf("Enter your choice: ");
+}
+
+int authenticate_administrator() {
+    char password[20];
+    printf("Enter administrator password: ");
+    scanf("%19s", password);
+    getchar(); // Consume newline character left by scanf
+
+    if (strcmp(password, ADMIN_PASSWORD) == 0) {
+        printf("Authentication successful.\n");
+        return 1;
+    } else {
+        printf("Authentication failed. Incorrect password.\n");
+        return 0;
+    }
+}
+
+int main() {
+    FATFileSystem fs;
+    initialize_file_system(&fs);
+
+    int role;
+    int authenticated = 0;
+
+    while (!authenticated) {
+        printf("Choose your role:\n");
+        printf("1. Administrator\n");
+        printf("2. User\n");
+        printf("Enter your choice: ");
+
+        if (scanf("%d", &role) != 1) {
+            printf("Invalid input. Please enter a number.\n");
+            while (getchar() != '\n'); // Clear invalid input
+            continue;
+        }
+        getchar(); // Consume newline character left by scanf
+
+        switch (role) {
+            case 1: // Administrator mode
+                if (authenticate_administrator()) {
+                    authenticated = 1;
+                }
+                break;
+
+            case 2: // User mode
+                authenticated = 1;
+                break;
+
+            default:
+                printf("Invalid choice. Please enter 1 or 2.\n");
+                break;
+        }
+    }
+
+    int choice;
+    do {
+        display_menu(role, &fs);
+        if (scanf("%d", &choice) != 1) {
+            printf("Invalid input. Please enter a number.\n");
+            while (getchar() != '\n'); // Clear invalid input
+            continue;
+        }
+        getchar(); // Consume newline character left by scanf
+
+        switch (role) {
+            case 1: // Administrator mode
+                switch (choice) {
+                    case 1: // Create a file
+                    {
+                        char filename[FILENAME_MAX_LEN];
+                        char data[DISK_SIZE * BLOCK_SIZE]; // Max data size that can be created
+
+                        printf("Enter filename: ");
+                        if (scanf("%19s", filename) != 1) {
+                            printf("Invalid filename. Please try again.\n");
+                            while (getchar() != '\n'); // Clear invalid input
+                            break;
+                        }
+                        getchar(); // Consume newline character left by scanf
+
+                        printf("Enter data to write into file: ");
+                        fgets(data, sizeof(data), stdin);
+                        data[strcspn(data, "\n")] = '\0'; // Remove trailing newline
+
+                        create_file(&fs, filename, data);
+                        break;
+                    }
+
+                    case 2: // Write to a file
+                    {
+                        char filename[FILENAME_MAX_LEN];
+                        char data[DISK_SIZE * BLOCK_SIZE]; // Max data size that can be written
+
+                        printf("Enter filename: ");
+                        if (scanf("%19s", filename) != 1) {
+                            printf("Invalid filename. Please try again.\n");
+                            while (getchar() != '\n'); // Clear invalid input
+                            break;
+                        }
+                        getchar(); // Consume newline character left by scanf
+
+                        printf("Enter data to write into file: ");
+                        fgets(data, sizeof(data), stdin);
+                        data[strcspn(data, "\n")] = '\0'; // Remove trailing newline
+
+                        write_to_file(&fs, filename, data);
+                        break;
+                    }
+
+                    case 3: // Delete a file
+                    {
+                        char filename[FILENAME_MAX_LEN];
+                        printf("Enter filename to delete: ");
+                        if (scanf("%19s", filename) != 1) {
+                            printf("Invalid filename. Please try again.\n");
+                            while (getchar() != '\n'); // Clear invalid input
+                            break;
+                        }
+                        getchar(); // Consume newline character left by scanf
+
+                        delete_file(&fs, filename);
+                        break;
+                    }
+
+                    case 4: // Read a file
+                    {
+                        char filename[FILENAME_MAX_LEN];
+                        printf("Enter filename to read: ");
+                        if (scanf("%19s", filename) != 1) {
+                            printf("Invalid filename. Please try again.\n");
+                            while (getchar() != '\n'); // Clear invalid input
+                            break;
+                        }
+                        getchar(); // Consume newline character left by scanf
+
+                        read_file(&fs, filename);
+                        break;
+                    }
+
+                    case 5: // Switch to User Mode
+                        role = 2;
+                        break;
+
+                    case 6: // Exit
+                        printf("Exiting...\n");
+                        break;
+
+                    default:
+                        printf("Invalid choice. Please enter a number from 1 to 6.\n");
+                        break;
+                }
+                break;
+
+            case 2: // User mode
+                switch (choice) {
+                    case 1: // Read a file
+                    {
+                        int file_choice;
+                        printf("Enter the number of the file to read: ");
+                        if (scanf("%d", &file_choice) != 1 || file_choice < 1 || file_choice > fs.file_count) {
+                            printf("Invalid file number. Please try again.\n");
+                            while (getchar() != '\n'); // Clear invalid input
+                            break;
+                        }
+                        getchar(); // Consume newline character left by scanf
+
+                        // Adjust index to match array (file_choice - 1)
+                        read_file(&fs, fs.files[file_choice - 1].name);
+                        break;
+                    }
+
+                    case 2: // Switch to Administrator Mode
+                    {
+                        char password[20];
+                        printf("Enter administrator password: ");
+                        scanf("%19s", password);
+                        getchar(); // Consume newline character left by scanf
+
+                        if (strcmp(password, ADMIN_PASSWORD) == 0) {
+                            role = 1; // Switch to Administrator Mode
+                            printf("Switched to Administrator Mode.\n");
+                        } else {
+                            printf("Incorrect password. Cannot switch to Administrator Mode.\n");
+                        }
+                        break;
+                    }
+
+                    case 3: // Exit
+                        printf("Exiting...\n");
+                        break;
+
+                    default:
+                        printf("Invalid choice. Please enter a number from 1 to 3.\n");
+                        break;
+                }
+                break;
+
+            default:
+                printf("Invalid role. Exiting...\n");
+                break;
+        }
+    } while (choice != 6 && choice != 3); // Exit conditions for Administrator and User
+
+    // Free dynamically allocated memory
+    if (fs.files) {
+        free(fs.files);
+    }
+
+    return 0;
+}
